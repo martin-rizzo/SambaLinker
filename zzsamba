@@ -1,0 +1,217 @@
+#!/bin/sh
+#  Bash script for easy control and access to Samba resources
+#  https://github.com/martin-rizzo/ZZScripts
+#  by Martin Rizzo
+ScriptName="${0##*/}";ScriptVersion=0.1
+Help="
+Usage: $ScriptName COMMAND [resource]
+
+Admin Commands:
+    $ScriptName info  [host]
+    $ScriptName fstab [host]
+    $ScriptName secure
+
+User Commands:
+    $ScriptName list
+    $ScriptName mount  <dir>
+    $ScriptName umount <dir>
+
+Options:
+    -h, --help     display this help
+    -V, --version  display script version
+
+Examples:
+    ....
+"
+
+# CONSTANTS (can be modified by the arguments passed to the script)
+SambaUser=
+SambaHost=
+Disk=
+
+
+function parse_samba_path() {
+  local path=$1
+  SambaUser=${path%@*}
+  [ "$SambaUser" == "$path" ] && SambaUser=$USER
+  Disk=${path#*/}
+  [ "$Disk" == "$path" ] && Disk=""
+  SambaHost=${path#$SambaUser@}
+  SambaHost=${SambaHost%/$Disk}
+}
+
+
+function proc_samba_disks() {
+    local smbuser="$1" smbhost="$2" funct="$3"
+    local disklines name type comment
+
+    echo    "Logging in to $smbuser@$smbhost"
+    echo -n 'Password: '
+    disklines=$(smbclient -L $smbhost -U $smbuser | grep -i 'Disk')
+    echo
+
+    $funct '#BEGIN'
+    while read diskline; do
+      diskline=$(echo $diskline)
+      name="${diskline%% *}"; diskline="${diskline#* }"
+      type="${diskline%% *}"; diskline="${diskline#* }"
+      comment="$diskline"
+      $funct '#ITEM' "$name" "$type" "$comment"
+    done <<< "$disklines"
+    $funct '#END'
+}
+
+#------------------------------- INFO COMMAND -------------------------------#
+
+function print_disk_info() {
+    local cmd="$1" name="$2" type="$3" comment="$4"
+    [ "$cmd" = '#BEGIN' ] && echo -e "\n  [$SambaUser@$SambaHost]"
+    [ "$cmd" = '#ITEM'  ] && printf '     +- %-14.14s %s\n' "$name" "$comment"
+    [ "$cmd" = '#END'   ] && echo
+}
+
+function cmd_info() {
+    parse_samba_path "$1"
+    proc_samba_disks "$SambaUser" "$SambaHost" print_disk_info
+}
+
+#------------------------------ FSTAB COMMAND -------------------------------#
+
+function print_fstab_conf() {
+    local cmd="$1" diskname="$2" disktype="$3" comment="$4"
+    local hostdir group flags
+
+    if [ "$cmd" = '#ITEM' ]; then
+      hostdir='Mendoserver'
+      group=$(id -g -n)
+      resour="//$SambaHost/$diskname"
+      mountdir="/home/$USER/$hostdir/$diskname"
+      flags="user,noauto,rw,username,uid=$USER,gid=$group"
+      printf '%-30s %-40s cifs %-24s 0 0\n' "$resour" "$mountdir" "$flags"
+    fi
+}
+
+function cmd_fstab() {
+    parse_samba_path "$1"
+    proc_samba_disks "$SambaUser" "$SambaHost" print_fstab_conf
+}
+
+#------------------------------ SECURE COMMAND ------------------------------#
+
+function get_safety() {
+    local path=$(which $1)
+    local perbits=$(stat -c '%A' "$path")
+    local status=${perbits:3:1}
+    echo "$path" "$status" "$perbits"
+}
+
+function print_safety() {
+    local path="$1" status="$2" perbits="$3"
+    local comment suid
+    case $status in
+      x)
+        suid='NO' ; comment='[user mounts not supported]'
+        ;;
+      s)
+        suid='YES' ; comment=''
+        ;;
+      *)
+        suid='ERR'
+        ;;
+    esac
+    printf '    %-10s   %-4s  %-22s %s\n' "$perbits" "$suid" "$path" "$comment"
+}
+
+function cmd_safety() {
+    local mount_path     mount_st
+    local umount_path    umount_st
+    local mountcifs_path mountcifs_st
+    echo
+
+    echo '  Enabling SUID on mount allows non-privileged users to mount file systems,'
+    echo '  but disabling it improves security by limiting execution of this command.'
+    echo
+
+    echo '  Current state of the SUID bit:'
+    read mount_path mount_st perbits <<< $(get_safety mount)
+    print_safety "$mount_path" "$mount_st" "$perbits"
+    read umount_path umount_st perbits <<< $(get_safety umount)
+    print_safety "$umount_path" "$umount_st" "$perbits"
+    read mountcifs_path mountcifs_st perbits <<< $(get_safety mount.cifs)
+    print_safety "$mountcifs_path" "$mountcifs_st" "$perbits"
+    echo
+
+
+    if [ "$mount_st" != s -o "$umount_st" != s -o "$mountcifs_st" != s ]; then
+    echo '  To allow users mount samba resources, try enabling SUID bit:'
+    [ "$mount_st"     != s ] && echo "    > sudo chmod u+s $mount_path"
+    [ "$umount_st"    != s ] && echo "    > sudo chmod u+s $umount_path"
+    [ "$mountcifs_st" != s ] && echo "    > sudo chmod u+s $mountcifs_path"
+    echo
+    fi
+
+    if [ "$mountcifs_st" == s ]; then
+    echo '  If you just want to improve security then disable SUID bit:'
+    echo '    ## this disable mount of samba resources for non-privileged users'
+    echo "    > sudo chmod u-s $mountcifs_path"
+    echo
+    fi
+}
+
+#------------------------------- LIST COMMAND -------------------------------#
+
+function cmd_list() {
+  parse_samba_path "$1"
+  echo COMMAND = list
+  echo SambaUser = $SambaUser
+  echo SambaHost = $SambaHost
+  echo Disk = $Disk
+}
+
+#------------------------------- MOUNT COMMAND ------------------------------#
+
+function cmd_mount() {
+  parse_samba_path "$1"
+  echo COMMAND = mount
+  echo SambaUser = $SambaUser
+  echo SambaHost = $SambaHost
+  echo Disk = $Disk
+}
+
+#------------------------------- UMOUNT COMMAND -----------------------------#
+
+function cmd_umount() {
+  parse_samba_path "$1"
+  echo COMMAND = umount
+  echo SambaUser = $SambaUser
+  echo SambaHost = $SambaHost
+  echo Disk = $Disk
+}
+
+
+
+#================================== START ==================================#
+
+case "$1" in
+
+  "info")
+    cmd_info "$2"
+    ;;
+  "fstab")
+    cmd_fstab "$2"
+    ;;
+  "safety")
+    cmd_safety "$2"
+    ;;
+  "list")
+    cmd_list "$2"
+    ;;
+  "mount")
+    cmd_mount "$2"
+    ;;
+  "umount")
+    cmd_umount "$2"
+    ;;
+
+esac
+
