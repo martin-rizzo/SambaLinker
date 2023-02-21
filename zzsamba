@@ -61,6 +61,35 @@ function proc_samba_disks() {
     $funct '#END'
 }
 
+
+## Reads the "/etc/fstab" file line by line, and calls the function
+## specified as argument to process each line.
+##
+## @param func
+##     The name of the function to process each line of /etc/fstab.
+##     The function should accept the following parameters:
+##         $1: A line count (starting at 1)
+##         $1: The device name, eg.: //sambaserver/Disk
+##         $2: The mount point, eg.: /home/user/ServerName/Disk
+##         $3: The file system type, eg.: cifs
+##         $4: The mount options separated by commas.
+##
+function proc_fstab() {
+    local func="$1"
+    local count=1 fs_type options
+    while IFS= read -r line; do
+      if [[ $line != \#* ]]; then
+        fields=($line)
+        fs_type=${fields[2]}
+        options=${fields[3]}
+        if [ "$fs_type" = cifs -a "$options" != "${options/,uid=$USER,/}" ]; then
+          $func $count "${fields[0]}" "${fields[1]}" "$fs_type" "$options"
+          ((count++))
+        fi
+      fi
+    done < "/etc/fstab"
+}
+
 #------------------------------- INFO COMMAND -------------------------------#
 
 function print_disk_info() {
@@ -79,15 +108,24 @@ function cmd_info() {
 
 function print_fstab_conf() {
     local cmd="$1" diskname="$2" disktype="$3" comment="$4"
-    local hostdir group flags
+    local hostdir group flg1 flg2
 
+    if [ "$cmd" = '#BEGIN' ]; then
+      echo
+      echo 'These lines must be added to /etc/fstab to allow mounting:'
+      echo
+    fi
     if [ "$cmd" = '#ITEM' ]; then
       hostdir='Mendoserver'
       group=$(id -g -n)
       resour="//$SambaHost/$diskname"
       mountdir="/home/$USER/$hostdir/$diskname"
-      flags="user,noauto,rw,username,uid=$USER,gid=$group"
-      printf '%-30s %-40s cifs %-24s 0 0\n' "$resour" "$mountdir" "$flags"
+      flg1="user,noauto,rw,uid=$USER,gid=$group,file_mode=0640,dir_mode=0750"
+      flg2="credentials=/home/$USER/$hostdir/credentials"
+      printf '%-30s %-40s cifs %-24s 0 0\n' "$resour" "$mountdir" "$flg1,$flg2"
+    fi
+    if [ "$cmd" = '#END' ]; then
+      echo
     fi
 }
 
@@ -160,12 +198,26 @@ function cmd_safety() {
 
 #------------------------------- LIST COMMAND -------------------------------#
 
+function print_disk() {
+    local count="$1" disk="$2" mount_point="$3" fs_type="$4" options="$5"
+
+    if [ "$fs_type" = cifs -a "$options" != "${options/,uid=$USER,/}" ]; then
+      IFS='/' read -ra path_array <<< "$mount_point"
+      resource="${path_array[-2]}/${path_array[-1]}"
+      printf '    %2d) %s\n' "$count" "$resource"
+    fi
+}
+
 function cmd_list() {
-  parse_samba_path "$1"
-  echo COMMAND = list
-  echo SambaUser = $SambaUser
-  echo SambaHost = $SambaHost
-  echo Disk = $Disk
+    echo
+    echo '  Available disks:'
+    proc_fstab print_disk
+    echo
+    echo '  Disks can be mounted by its order number or its name:'
+    echo "     > $ScriptName mount 1"
+    echo "     > $ScriptName mount Album"
+    echo "     > $ScriptName mount Mendoserver/Album"
+    echo
 }
 
 #------------------------------- MOUNT COMMAND ------------------------------#
@@ -200,7 +252,7 @@ case "$1" in
   "fstab")
     cmd_fstab "$2"
     ;;
-  "safety")
+  "secure")
     cmd_safety "$2"
     ;;
   "list")
