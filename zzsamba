@@ -30,12 +30,39 @@ SambaHost=
 Disk=
 
 
+#---------------------------------- HELPERS ---------------------------------#
+
 function set_disk() {
     if [[ "$1" =~ ^[0-9]+$ || "$1" == /* ]]; then
       Disk="$1"
     else
       Disk="/$1"
     fi
+}
+
+## Verifies if a disk was selected by the user
+##
+## @param selection      the user selection (an order number or disk name)
+## @param disk_idx       the disk index in the list
+## @param disk_smbname   the disk's samba resource name
+## @param disk_mount     the path where the disk is mounted
+##
+function is_selected_disk() {
+    local selection=$1
+    local disk_idx=$2 disk_smbname=$3 disk_mount=$4
+
+    if [[ ! $selection ]]; then
+        return 0
+    elif [[ $selection = $disk_idx ]]; then
+        return 0
+    else
+        case "${disk_mount,,}" in
+          *"${selection,,}")
+            return 0
+            ;;
+        esac
+    fi
+    return 1
 }
 
 function parse_samba_path() {
@@ -73,33 +100,44 @@ function proc_samba_disks() {
     $funct '#END'
 }
 
-## Reads the "/etc/fstab" file line by line, and calls the function
-## specified as argument to process each line.
+## Reads the file /etc/fstab line by line and calls the function specified
+## as argument to process each samba disk that is detected (and meets the
+## filters)
 ##
-## @param func
-##     The name of the function to process each line of /etc/fstab.
-##     The function should accept the following parameters:
-##         $1: A line count (starting at 1)
+## The global var 'found' will be set if any disk was found.
+##
+## @param function_name
+##     The function to call to process each samba disk.
+##     It should accept the following parameters:
+##         $1: The samba disk index (starting at 1)
 ##         $1: The device name, eg.: //sambaserver/Disk
 ##         $2: The mount point, eg.: /home/user/ServerName/Disk
 ##         $3: The file system type, eg.: cifs
 ##         $4: The mount options separated by commas.
 ##
-function proc_fstab() {
-    local func="$1"
-    local count=1 fs_type options
+## @param user
+##     (used as filter) The user
+##
+## @param selection
+##     (used as filter) The order number or name of the disk
+##
+function foreach_disk() {
+    local function_name="$1" user="$2" selection="$3"
+    local index=1 fields disk_name mount_pt fs_type options
+    found=''
     while IFS= read -r line; do
       if [[ $line != \#* ]]; then
         fields=($line)
-        fs_type=${fields[2]}
-        options=${fields[3]}
-        if [ "$fs_type" = cifs -a "$options" != "${options/,uid=$USER,/}" ]; then
-          $func $count "${fields[0]}" "${fields[1]}" "$fs_type" "$options"
-          if [[ $? != 0 ]]; then
-            break
-          fi
-          ((count++))
+        disk_name=${fields[0]}
+        mount_pt=${fields[1]} ; fs_type=${fields[2]} ; options=${fields[3]}
+        if [[ $fs_type != cifs ]]; then continue; fi
+        if [[ $user ]] && [[ $options != *",uid=$user,"* ]]; then continue; fi
+
+        if is_selected_disk "$selection" $index "$disk_name" "$mount_pt"; then
+          found='YES'
+          $function_name $index "$disk_name" "$mount_pt" "$fs_type" "$options" || break
         fi
+        ((index++))
       fi
     done < "/etc/fstab"
 }
@@ -212,82 +250,87 @@ function cmd_safety() {
 
 #------------------------------- LIST COMMAND -------------------------------#
 
-function print_disk() {
-    local count="$1" disk="$2" mount_point="$3" fs_type="$4" options="$5"
+# These globals will be filled with the info of the disk with the longest name.
+# They are used as examples of the 'zzsamba mount' subcommand.
+EgNumber=
+EgShortName=
+EgLongName=
 
-    if [ "$fs_type" = cifs -a "$options" != "${options/,uid=$USER,/}" ]; then
-      IFS='/' read -ra path_array <<< "$mount_point"
-      resource="${path_array[-2]}/${path_array[-1]}"
-      printf '    %2d) %s\n' "$count" "$resource"
+function print_disk() {
+    local disk_idx="$1" path_array
+    local disk_smbname="$2" disk_path="$3" disk_type="$4" disk_opts="$5"
+
+    if [[ $disk_idx ]]; then
+      IFS='/' read -ra path_array <<< "$disk_path"
+      if [[ ${#EgShortName} -lt ${#path_array[-1]} ]]; then
+        EgNumber=$disk_idx
+        EgShortName=${path_array[-1]}
+        EgLongName="${path_array[-2]}/${path_array[-1]}"
+      fi
+      printf '    %2d) %s\n' "$disk_idx" "${path_array[-2]}/${path_array[-1]}"
+    else
+      echo 'No disk found'
     fi
 }
 
 function cmd_list() {
     echo
     echo '  Available disks:'
-    proc_fstab print_disk
-    echo
-    echo '  Disks can be mounted by its order number or its name:'
-    echo "     > $ScriptName mount 1"
-    echo "     > $ScriptName mount Album"
-    echo "     > $ScriptName mount Mendoserver/Album"
-    echo
+    foreach_disk print_disk "$USER"
+    if [[ $found ]]; then
+      echo
+      echo '  Disks can be mounted by its order number or its name:'
+      echo "     > $ScriptName mount $EgNumber"
+      echo "     > $ScriptName mount $EgShortName"
+      echo "     > $ScriptName mount $EgLongName"
+      echo
+    else
+      echo "    - no disk available for user $USER -"
+      echo
+    fi
 }
 
 #------------------------------- MOUNT COMMAND ------------------------------#
 
 function mount_disk() {
-    local count="$1" disk_name="$2" mount_point="$3" fs_type="$4" options="$5"
-    local found
-    if [[ $Disk = $count ]]; then
-      found=YES
-    else
-      case "${mount_point,,}" in
-        *"${Disk,,}")
-          found=YES
-          ;;
-      esac
-    fi
-    if [[ $found ]]; then
-      echo "Mounting $mount_point ..."
-      mkdir -p "$mount_point"
-      mount "$mount_point"
-      return 1
-    fi
+    local disk_idx="$1"
+    local disk_smbname="$2" disk_path="$3" disk_type="$4" disk_opts="$5"
+    echo "Mounting $disk_path ..."
+    mkdir -p "$disk_path"
+    mount "$disk_path"
+    return 1
 }
 
 function cmd_mount() {
     set_disk "$1"
-    proc_fstab mount_disk
+    echo
+    foreach_disk mount_disk "$USER" "$Disk"
+    if [[ ! $found ]]; then
+      echo "  - no disk named $Disk was found -"
+    fi
+    echo
 }
 
 #------------------------------- UMOUNT COMMAND -----------------------------#
 
 function umount_disk() {
-    local count="$1" disk_name="$2" mount_point="$3" fs_type="$4" options="$5"
-    local found
-    if [[ $Disk = $count ]]; then
-      found=YES
-    else
-      case "${mount_point,,}" in
-        *"${Disk,,}")
-          found=YES
-          ;;
-      esac
-    fi
-    if [[ $found ]]; then
-      echo "Unmounting $mount_point ..."
-      umount "$mount_point"
-      rmdir "$mount_point"
-      return 1
-    fi
+    local disk_idx="$1"
+    local disk_smbname="$2" disk_path="$3" disk_type="$4" disk_opts="$5"
+    echo "Unmounting $disk_path ..."
+    umount "$disk_path"
+    rmdir "$disk_path"
+    return 1
 }
 
 function cmd_umount() {
     set_disk "$1"
-    proc_fstab umount_disk
+    echo
+    foreach_disk umount_disk "$USER" "$Disk"
+    if [[ ! $found ]]; then
+      echo "  - no disk named $Disk was found -"
+    fi
+    echo
 }
-
 
 
 #================================== START ==================================#
