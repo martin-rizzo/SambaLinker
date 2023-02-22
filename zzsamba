@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #  Bash script for easy control and access to Samba resources
 #  https://github.com/martin-rizzo/ZZScripts
 #  by Martin Rizzo
@@ -30,14 +30,22 @@ SambaHost=
 Disk=
 
 
+function set_disk() {
+    if [[ "$1" =~ ^[0-9]+$ || "$1" == /* ]]; then
+      Disk="$1"
+    else
+      Disk="/$1"
+    fi
+}
+
 function parse_samba_path() {
-  local path=$1
-  SambaUser=${path%@*}
-  [ "$SambaUser" == "$path" ] && SambaUser=$USER
-  Disk=${path#*/}
-  [ "$Disk" == "$path" ] && Disk=""
-  SambaHost=${path#$SambaUser@}
-  SambaHost=${SambaHost%/$Disk}
+    local path=$1
+    SambaUser=${path%@*}
+    [[ "$SambaUser" == "$path" ]] && SambaUser=$USER
+    Disk=${path#*/}
+    [[ "$Disk" == "$path" ]] && Disk=""
+    SambaHost=${path#$SambaUser@}
+    SambaHost=${SambaHost%/$Disk}
 }
 
 
@@ -57,10 +65,13 @@ function proc_samba_disks() {
       type="${diskline%% *}"; diskline="${diskline#* }"
       comment="$diskline"
       $funct '#ITEM' "$name" "$type" "$comment"
+      if [[ $? != 0 ]]; then
+        echo STOP!
+        break
+      fi
     done <<< "$disklines"
     $funct '#END'
 }
-
 
 ## Reads the "/etc/fstab" file line by line, and calls the function
 ## specified as argument to process each line.
@@ -84,6 +95,9 @@ function proc_fstab() {
         options=${fields[3]}
         if [ "$fs_type" = cifs -a "$options" != "${options/,uid=$USER,/}" ]; then
           $func $count "${fields[0]}" "${fields[1]}" "$fs_type" "$options"
+          if [[ $? != 0 ]]; then
+            break
+          fi
           ((count++))
         fi
       fi
@@ -222,22 +236,56 @@ function cmd_list() {
 
 #------------------------------- MOUNT COMMAND ------------------------------#
 
+function mount_disk() {
+    local count="$1" disk_name="$2" mount_point="$3" fs_type="$4" options="$5"
+    local found
+    if [[ $Disk = $count ]]; then
+      found=YES
+    else
+      case "${mount_point,,}" in
+        *"${Disk,,}")
+          found=YES
+          ;;
+      esac
+    fi
+    if [[ $found ]]; then
+      echo "Mounting $mount_point ..."
+      mkdir -p "$mount_point"
+      mount "$mount_point"
+      return 1
+    fi
+}
+
 function cmd_mount() {
-  parse_samba_path "$1"
-  echo COMMAND = mount
-  echo SambaUser = $SambaUser
-  echo SambaHost = $SambaHost
-  echo Disk = $Disk
+    set_disk "$1"
+    proc_fstab mount_disk
 }
 
 #------------------------------- UMOUNT COMMAND -----------------------------#
 
+function umount_disk() {
+    local count="$1" disk_name="$2" mount_point="$3" fs_type="$4" options="$5"
+    local found
+    if [[ $Disk = $count ]]; then
+      found=YES
+    else
+      case "${mount_point,,}" in
+        *"${Disk,,}")
+          found=YES
+          ;;
+      esac
+    fi
+    if [[ $found ]]; then
+      echo "Unmounting $mount_point ..."
+      umount "$mount_point"
+      rmdir "$mount_point"
+      return 1
+    fi
+}
+
 function cmd_umount() {
-  parse_samba_path "$1"
-  echo COMMAND = umount
-  echo SambaUser = $SambaUser
-  echo SambaHost = $SambaHost
-  echo Disk = $Disk
+    set_disk "$1"
+    proc_fstab umount_disk
 }
 
 
