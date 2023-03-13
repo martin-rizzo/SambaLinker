@@ -1,6 +1,6 @@
 #!/bin/bash
 #  Bash script for easy control and access to Samba resources
-#  https://github.com/martin-rizzo/ZZScripts
+#  https://github.com/martin-rizzo/SambaLinker.git
 #  by Martin Rizzo
 ScriptName="${0##*/}";ScriptVersion=0.1
 Help="
@@ -251,7 +251,7 @@ function cmd_safety() {
 #------------------------------- LIST COMMAND -------------------------------#
 
 # These globals will be filled with the info of the disk with the longest name.
-# They are used as examples of the 'zzsamba mount' subcommand.
+# They are used as examples of the 'smblinker mount' subcommand.
 EgNumber=
 EgShortName=
 EgLongName=
